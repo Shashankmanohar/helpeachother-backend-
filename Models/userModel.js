@@ -93,6 +93,10 @@ const userSchema = new mongoose.Schema({
     cashbackTotalEarned: {
         type: Number,
         default: 0
+    },
+    lifetimeWithdrawal: {
+        type: Boolean,
+        default: false
     }
 }, { timestamps: true });
 

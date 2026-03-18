@@ -16,6 +16,50 @@ const generateReferralCode = (base) => {
     return `${prefix}${random}`;
 };
 
+// Referral Eligibility Checker (Streak Logic)
+const checkReferralEligibility = async (user) => {
+    if (user.lifetimeWithdrawal) return { isEligible: true, lifetimeUnlocked: true };
+
+    const allDirects = await User.find({
+        referredBy: { $in: [user.userName, user.referralCode] },
+        status: 'active'
+    });
+
+    // 1. Lifetime check (3 months streak)
+    // Check if user has referred 2+ in each of their first 3 months of activity
+    const baseDate = user.activatedAt || user.createdAt;
+    const m1Start = baseDate;
+    const m2Start = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const m3Start = new Date(baseDate.getTime() + 60 * 24 * 60 * 60 * 1000);
+    const m3End = new Date(baseDate.getTime() + 90 * 24 * 60 * 60 * 1000);
+
+    const m1 = allDirects.filter(u => u.createdAt >= m1Start && u.createdAt < m2Start).length;
+    const m2 = allDirects.filter(u => u.createdAt >= m2Start && u.createdAt < m3Start).length;
+    const m3 = allDirects.filter(u => u.createdAt >= m3Start && u.createdAt < m3End).length;
+
+    if (m1 >= 2 && m2 >= 2 && m3 >= 2) {
+        user.lifetimeWithdrawal = true;
+        await user.save();
+        return { isEligible: true, lifetimeUnlocked: true };
+    }
+
+    // 2. Current Month check (last 30 days)
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+    const recent30Count = allDirects.filter(u => u.createdAt >= thirtyDaysAgo).length;
+
+    if (recent30Count >= 2) {
+        return { isEligible: true, lifetimeUnlocked: false, recent30Count };
+    }
+
+    return { 
+        isEligible: false, 
+        lifetimeUnlocked: false,
+        reason: `Referral requirement not met. 2 active referrals needed in 30 days, or 2 active referrals each for 3 consecutive months for lifetime access.`,
+        stats: { m1, m2, m3, recent30Count }
+    };
+};
+
 // Automated Cashback Processor
 const processAutomatedCashback = async (user) => {
     const DAILY_AMOUNT = 40;
@@ -23,6 +67,12 @@ const processAutomatedCashback = async (user) => {
     const VALID_MONTHS = 3;
 
     if (user.status !== 'active') return user;
+
+    // Check if today is Saturday or Sunday (IST)
+    const dayOfWeek = new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', weekday: 'long' });
+    if (dayOfWeek === 'Saturday' || dayOfWeek === 'Sunday') {
+        return user;
+    }
 
     const today = new Date().toISOString().split('T')[0];
 
@@ -356,6 +406,8 @@ export const getDashboardStats = async (req, res) => {
         const levelIncome = levelTransactions.reduce((sum, tx) => sum + tx.amount, 0);
 
         res.status(200).json({
+            userName: user.userName,
+            name: user.name,
             walletBalance: user.walletBalance,
             totalEarned: user.totalEarned,
             status: user.status,
@@ -363,6 +415,7 @@ export const getDashboardStats = async (req, res) => {
             referralCode: user.referralCode,
             activeDirects,
             totalTeam,
+            referralEligibility: await checkReferralEligibility(user),
             autopoolIncome,
             levelIncome
         });
@@ -421,6 +474,7 @@ export const activateID = async (req, res) => {
 
         // 2. Activate User
         user.status = 'active';
+        user.paymentStatus = 'approved';
         await user.save();
 
         // 3. Referral Income Distribution
@@ -457,17 +511,24 @@ export const activateID = async (req, res) => {
                     level: 1
                 });
 
-                // Distribute Level Income
+                // Distribute Level Income (L2–L8 one-time activation bonuses)
                 let currentReferrer = referrer;
-                const levels = [6, 3, 1, 1, 0.5, 0.5, 0.25, 0.25];
+                // one-time activation bonuses for L2 upward (L1 = directBonus ₹120 already credited above)
+                const activationLevelBonuses = [30, 10, 10, 5, 5, 2.5, 2.5]; // L2, L3, L4, L5, L6, L7, L8
 
-                for (let i = 1; i < levels.length; i++) {
+                for (let i = 0; i < activationLevelBonuses.length; i++) {
                     if (!currentReferrer.referredBy) break;
 
-                    const nextReferrer = await User.findOne({ userName: currentReferrer.referredBy });
+                    const nextReferrer = await User.findOne({
+                        $or: [
+                            { referralCode: currentReferrer.referredBy },
+                            { userName: currentReferrer.referredBy }
+                        ]
+                    });
                     if (!nextReferrer) break;
 
-                    const levelBonus = levels[i] * 10;
+                    const levelBonus = activationLevelBonuses[i];
+                    const levelNumber = i + 2; // starts at L2
                     nextReferrer.walletBalance += levelBonus;
                     nextReferrer.totalEarned += levelBonus;
                     await nextReferrer.save();
@@ -477,7 +538,7 @@ export const activateID = async (req, res) => {
                         amount: levelBonus,
                         type: 'credit',
                         category: 'referral_level',
-                        description: `Level ${i + 1} referral bonus from ${user.userName}`
+                        description: `Level ${levelNumber} activation bonus from ${user.userName}`
                     });
 
                     await Revenue.create({
@@ -489,7 +550,7 @@ export const activateID = async (req, res) => {
                     await Referral.create({
                         referrer: nextReferrer._id,
                         referred: user._id,
-                        level: i + 1
+                        level: levelNumber
                     });
 
                     currentReferrer = nextReferrer;
@@ -512,6 +573,11 @@ export const requestWithdrawal = async (req, res) => {
 
         if (user.kycStatus !== 'approved') {
             return res.status(400).json({ message: "Please complete and get your KYC approved before withdrawal" });
+        }
+
+        const eligibility = await checkReferralEligibility(user);
+        if (!eligibility.isEligible) {
+            return res.status(400).json({ message: eligibility.reason, stats: eligibility.stats });
         }
 
         if (amount < 500) {
@@ -625,6 +691,11 @@ export const buyEPin = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ message: "User not found" });
 
+        const eligibility = await checkReferralEligibility(user);
+        if (!eligibility.isEligible) {
+            return res.status(400).json({ message: eligibility.reason, stats: eligibility.stats });
+        }
+
         if (user.walletBalance < EPIN_COST) {
             return res.status(400).json({ message: `Insufficient balance. Need ₹${EPIN_COST}, have ₹${user.walletBalance}` });
         }
@@ -712,9 +783,7 @@ export const activateUserByPin = async (req, res) => {
         // Activate the target user
         targetUser.status = 'active';
         targetUser.activatedAt = new Date();
-        if (targetUser.paymentStatus === 'pending') {
-            targetUser.paymentStatus = 'approved';
-        }
+        targetUser.paymentStatus = 'approved';
         await targetUser.save();
 
         // Referral Income Distribution for the target user
@@ -751,15 +820,24 @@ export const activateUserByPin = async (req, res) => {
                     level: 1
                 });
 
-                // Level Income Distribution
+                // Level Income Distribution (L2–L8 one-time activation bonuses)
                 let currentReferrer = referrer;
-                const levels = [6, 3, 1, 1, 0.5, 0.5, 0.25, 0.25];
-                for (let i = 1; i < levels.length; i++) {
+                // one-time activation bonuses for L2 upward (L1 = directBonus ₹120 already credited above)
+                const activationLevelBonuses = [30, 10, 10, 5, 5, 2.5, 2.5]; // L2, L3, L4, L5, L6, L7, L8
+
+                for (let i = 0; i < activationLevelBonuses.length; i++) {
                     if (!currentReferrer.referredBy) break;
-                    const nextReferrer = await User.findOne({ userName: currentReferrer.referredBy });
+
+                    const nextReferrer = await User.findOne({
+                        $or: [
+                            { referralCode: currentReferrer.referredBy },
+                            { userName: currentReferrer.referredBy }
+                        ]
+                    });
                     if (!nextReferrer) break;
 
-                    const levelBonus = levels[i] * 10;
+                    const levelBonus = activationLevelBonuses[i];
+                    const levelNumber = i + 2; // starts at L2
                     nextReferrer.walletBalance += levelBonus;
                     nextReferrer.totalEarned += levelBonus;
                     await nextReferrer.save();
@@ -769,7 +847,7 @@ export const activateUserByPin = async (req, res) => {
                         amount: levelBonus,
                         type: 'credit',
                         category: 'referral_level',
-                        description: `Level ${i + 1} referral bonus from ${targetUser.userName}`
+                        description: `Level ${levelNumber} activation bonus from ${targetUser.userName}`
                     });
 
                     await Revenue.create({
@@ -781,7 +859,7 @@ export const activateUserByPin = async (req, res) => {
                     await Referral.create({
                         referrer: nextReferrer._id,
                         referred: targetUser._id,
-                        level: i + 1
+                        level: levelNumber
                     });
 
                     currentReferrer = nextReferrer;

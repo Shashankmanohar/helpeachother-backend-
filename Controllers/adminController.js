@@ -351,3 +351,130 @@ export const approveRejectPayment = async (req, res) => {
         res.status(500).json({ message: "Error updating payment status", error: error.message });
     }
 };
+
+export const adminActivateUserWithPin = async (req, res) => {
+    try {
+        const { identifier, pinCode } = req.body;
+
+        if (!identifier || !pinCode) {
+            return res.status(400).json({ message: "Identifier and Pin Code are required" });
+        }
+
+        const user = await User.findOne({
+            $or: [{ userName: identifier }, { email: identifier.toLowerCase() }]
+        });
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        if (user.status === 'active') {
+            return res.status(400).json({ message: "User is already active" });
+        }
+
+        const pin = await EPin.findOne({ code: pinCode, status: 'active' });
+        if (!pin) {
+            return res.status(404).json({ message: "Invalid or already used E-Pin" });
+        }
+
+        // 1. Mark Pin as used
+        pin.status = 'used';
+        pin.usedBy = user._id;
+        pin.usedAt = new Date();
+        await pin.save();
+
+        // 2. Activate User
+        user.status = 'active';
+        user.paymentStatus = 'approved';
+        user.activatedAt = new Date();
+        await user.save();
+
+        // 3. Referral Income Distribution
+        if (user.referredBy) {
+            const referrer = await User.findOne({
+                $or: [
+                    { referralCode: user.referredBy },
+                    { userName: user.referredBy }
+                ]
+            });
+
+            if (referrer) {
+                const directBonus = 120;
+                referrer.walletBalance += directBonus;
+                referrer.totalEarned += directBonus;
+                await referrer.save();
+
+                await Transaction.create({
+                    user: referrer._id,
+                    amount: directBonus,
+                    type: 'credit',
+                    category: 'referral_direct',
+                    description: `Direct referral bonus from ${user.userName} (Admin Activation)`
+                });
+
+                await Revenue.create({
+                    user: referrer._id,
+                    type: 'direct',
+                    amount: directBonus
+                });
+
+                await Referral.create({
+                    referrer: referrer._id,
+                    referred: user._id,
+                    level: 1
+                });
+
+                // Distribute Level Income (Level 2 to 8)
+                let currentReferrer = referrer;
+                const levels = [0, 120, 30, 10, 10, 5, 5, 2.5, 2.5]; // Index match levels, e.g., levels[2] is Level 2
+
+                for (let i = 2; i <= 8; i++) {
+                    if (!currentReferrer.referredBy) break;
+
+                    const nextReferrer = await User.findOne({
+                        $or: [
+                            { referralCode: currentReferrer.referredBy },
+                            { userName: currentReferrer.referredBy }
+                        ]
+                    });
+
+                    if (!nextReferrer) break;
+
+                    const levelBonus = levels[i];
+                    nextReferrer.walletBalance += levelBonus;
+                    nextReferrer.totalEarned += levelBonus;
+                    await nextReferrer.save();
+
+                    await Transaction.create({
+                        user: nextReferrer._id,
+                        amount: levelBonus,
+                        type: 'credit',
+                        category: `referral_level_${i}`,
+                        description: `Level ${i} referral bonus from ${user.userName}`
+                    });
+
+                    await Revenue.create({
+                        user: nextReferrer._id,
+                        type: 'level',
+                        amount: levelBonus,
+                        level: i
+                    });
+
+                    currentReferrer = nextReferrer;
+                }
+            }
+        }
+
+        res.status(200).json({
+            message: "User activated successfully",
+            user: {
+                id: user._id,
+                userName: user.userName,
+                status: user.status
+            }
+        });
+    } catch (error) {
+        console.error("Admin activation error:", error);
+        res.status(500).json({ message: "Error activating user", error: error.message });
+    }
+};

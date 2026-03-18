@@ -10,7 +10,8 @@ import {
     updateWithdrawalStatus,
     getAdminDashboardStats,
     getPendingPayments,
-    approveRejectPayment
+    approveRejectPayment,
+    adminActivateUserWithPin
 } from "../Controllers/adminController.js";
 import { protect, adminOnly } from "../Middleware/authMiddleware.js";
 
@@ -29,6 +30,7 @@ router.put("/withdraw/:id", protect, adminOnly, updateWithdrawalStatus);
 router.get("/dashboard", protect, adminOnly, getAdminDashboardStats);
 router.get("/pending-payments", protect, adminOnly, getPendingPayments);
 router.put("/approve-payment/:id", protect, adminOnly, approveRejectPayment);
+router.post("/activate-user-pin", protect, adminOnly, adminActivateUserWithPin);
 
 export default router;
 
