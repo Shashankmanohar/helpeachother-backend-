@@ -11,6 +11,7 @@ import {
     requestWithdrawal,
     submitPayment,
     getPaymentStatus,
+    getPaymentInfo,
     buyEPin,
     getUserEPins,
     activateUserByPin,
@@ -39,6 +40,7 @@ router.post('/withdraw', protect, requestWithdrawal);
 router.get('/withdrawals', protect, getUserWithdrawals);
 router.post('/submit-payment', protect, submitPayment);
 router.get('/payment-status', protect, getPaymentStatus);
+router.get('/payment-info', protect, getPaymentInfo);
 router.post('/buy-epin', protect, buyEPin);
 router.get('/epins', protect, getUserEPins);
 router.post('/activate-user', protect, activateUserByPin);

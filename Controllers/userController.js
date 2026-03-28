@@ -405,6 +405,9 @@ export const getDashboardStats = async (req, res) => {
         });
         const levelIncome = levelTransactions.reduce((sum, tx) => sum + tx.amount, 0);
 
+        // Check if joined autopool
+        const autopoolStatus = await Autopool.findOne({ user: user._id });
+
         res.status(200).json({
             userName: user.userName,
             name: user.name,
@@ -417,7 +420,9 @@ export const getDashboardStats = async (req, res) => {
             totalTeam,
             referralEligibility: await checkReferralEligibility(user),
             autopoolIncome,
-            levelIncome
+            levelIncome,
+            hasJoinedAutopool: !!autopoolStatus,
+            autopoolStatus
         });
     } catch (error) {
         res.status(500).json({ message: "Error fetching dashboard stats", error: error.message });
@@ -580,6 +585,16 @@ export const requestWithdrawal = async (req, res) => {
             return res.status(400).json({ message: eligibility.reason, stats: eligibility.stats });
         }
 
+        // New restriction: If total earnings >= 10,000, must join autopool to withdraw
+        if (user.totalEarned >= 10000) {
+            const hasJoinedAutopool = await Autopool.findOne({ user: user._id });
+            if (!hasJoinedAutopool) {
+                return res.status(400).json({ 
+                    message: "You have earned over ₹10,000. To continue with withdrawals, you must join the Autopool system first." 
+                });
+            }
+        }
+
         if (amount < 500) {
             return res.status(400).json({ message: "Minimum withdrawal is ₹500" });
         }
@@ -685,6 +700,18 @@ export const getPaymentStatus = async (req, res) => {
     }
 };
 
+export const getPaymentInfo = async (req, res) => {
+    try {
+        res.status(200).json({
+            upiId: "8340186033@ybl",
+            amount: 1199,
+            note: "Registration Fee for HEO Sahyog"
+        });
+    } catch (error) {
+        res.status(500).json({ message: "Error fetching payment info", error: error.message });
+    }
+};
+
 export const buyEPin = async (req, res) => {
     try {
         const EPIN_COST = 1199;
@@ -698,6 +725,13 @@ export const buyEPin = async (req, res) => {
 
         if (user.walletBalance < EPIN_COST) {
             return res.status(400).json({ message: `Insufficient balance. Need ₹${EPIN_COST}, have ₹${user.walletBalance}` });
+        }
+
+        // New restriction: Min earnings of 10,000 to buy E-PIN
+        if (user.totalEarned < 10000) {
+            return res.status(400).json({ 
+                message: `You must have earned at least ₹10,000 to purchase an E-PIN. Your current earnings: ₹${user.totalEarned}` 
+            });
         }
 
         // Generate unique pin code
